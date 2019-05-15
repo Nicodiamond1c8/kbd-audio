@@ -2,13 +2,23 @@
 
 ## Description
 
-This is a collection of command-line and GUI tools for capturing and analyzing audio data. The most interesting tool is called **keytap** - it can guess pressed keyboard keys only by analyzing the audio captured from the computer's microphone.
+This is a collection of command-line and GUI tools for capturing and analyzing audio data.
+
+### Keytap
+
+The most interesting tool is called **keytap** - it can guess pressed keyboard keys only by analyzing the audio captured from the computer's microphone.
 
 Check this blog post for more details:
 
 [Keytap: description and some random thoughts](https://ggerganov.github.io/jekyll/update/2018/11/30/keytap-description-and-thoughts.html)
 
 [Video: short demo of Keytap in action](https://www.youtube.com/watch?v=2OjzI9m7W10)
+
+### Keytap2
+
+The **keytap2** tool is another interesting tool for recovering text from audio. It does not require training data - instead it uses statistical information about the frequencies of the letters and n-grams in the English language. The tool is still in development, but you can see a short demonstration here:
+
+[Video: Keytap2 - recovering text from typing sound (7:50)](https://www.youtube.com/watch?v=Y8nWkdWl7Pg)
 
 [CTF: can you guess the text being typed?](https://ggerganov.github.io/keytap-challenge/)
 
@@ -17,6 +27,13 @@ Check this blog post for more details:
 Dependencies:
 
  - **SDL2** - used to capture audio and to open GUI windows [libsdl](https://www.libsdl.org)
+       
+       [Ubuntu]
+       $ sudo apt install libsdl2-dev
+       
+       [Mac OS with brew]
+       $ brew install sdl2  
+       
  - **FFTW3** *(optional)* - some of the helper tools perform Fourier transformations [fftw](http://www.fftw.org)
 
 **Linux and Mac OS**
@@ -116,7 +133,7 @@ Short summary of the available tools. If the status of the tool is not **stable*
 
       ./keytap2-gui recording.kbd n-gram.txt
 
-  <a href="https://i.imgur.com/yR3m5Bm.jpg" target="_blank">![keytap2-gui](https://i.imgur.com/yR3m5Bm.jpg)</a>
+  <a href="https://i.imgur.com/LRnTkPA.jpg" target="_blank">![keytap2-gui](https://i.imgur.com/LRnTkPA.jpg)</a>
 
   ---
 

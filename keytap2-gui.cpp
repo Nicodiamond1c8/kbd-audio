@@ -4,6 +4,7 @@
  */
 
 #include "subbreak.h"
+#include "subbreak2.h"
 
 #include "imgui.h"
 #include "imgui_impl_sdl.h"
@@ -25,7 +26,10 @@
 #include <thread>
 #include <algorithm>
 
-#define MY_DEBUG
+//#define MY_DEBUG
+
+int g_windowSizeX = 1920;
+int g_windowSizeY = 1200;
 
 struct stParameters;
 struct stMatch;
@@ -51,6 +55,32 @@ using TKeyPressPosition     = int64_t;
 using TKeyPressData         = stKeyPressData;
 using TKeyPressCollection   = stKeyPressCollection;
 
+enum Approach {
+    ClusterG = 0,
+    DBSCAN,
+    NonExactSubstitutionCipher0,
+
+    COUNT,
+};
+
+std::string getApproachStr(Approach approach) {
+    std::string res = "-";
+    switch (approach) {
+        case ClusterG:
+            res = "ClusterG clustering + Substition Cipher attack";
+            break;
+        case DBSCAN:
+            res = "DBSCAN clustering + Substition Cipher attack";
+            break;
+        case NonExactSubstitutionCipher0:
+            res = "Non-Exact Substitution Cipher attack";
+            break;
+        case COUNT:
+            break;
+    };
+    return res;
+}
+
 struct stParameters {
     int keyPressWidth_samples   = 256;
     int sampleRate              = 24000;
@@ -60,10 +90,14 @@ struct stParameters {
     int nMinKeysInCluster       = 3;
     std::string fnameLetterMask = "";
 
+    Approach approach = ClusterG;
+
     // simulated annealing
     int saMaxIterations = 1000000;
     float temp0 = 1e8;
     float coolingRate = 0.99995;
+
+    Cipher::TParameters cipher;
 };
 
 struct stMatch {
@@ -374,11 +408,10 @@ std::tuple<TCC, TOffset> findBestCC(
 
     //auto [samples1, n1] = waveform1;
     auto samples1 = waveform1.samples;
-    auto n1       = waveform1.n;
 
 #ifdef MY_DEBUG
     if (n0 + 2*alignWindow != n1) {
-        printf("BUG 924830jm92, n0 = %d, n1 = %d, a = %d\n", (int) n0, (int) n1, (int) alignWindow);
+        printf("BUG 924830jm92, n0 = %d, a = %d\n", (int) n0, (int) alignWindow);
     }
 #endif
 
@@ -582,6 +615,15 @@ bool clusterG(const TSimilarityMap & sim, TKeyPressCollection & keyPresses, TCC 
         auto ci = keyPresses[curpair.i].cid;
         auto cj = keyPresses[curpair.j].cid;
 
+        int bindi = -1;
+        int bindj = -1;
+        for (int k = 0; k < n; ++k) {
+            if (keyPresses[k].cid == ci && keyPresses[k].bind > -1) bindi = keyPresses[k].bind;
+            if (keyPresses[k].cid == cj && keyPresses[k].bind > -1) bindj = keyPresses[k].bind;
+        }
+
+        if (bindi != bindj && bindi > -1 && bindj > -1) continue;
+
         if (ci == cj) continue;
         auto cnew = std::min(ci, cj);
         int nsum = 0;
@@ -612,7 +654,7 @@ bool clusterG(const TSimilarityMap & sim, TKeyPressCollection & keyPresses, TCC 
         sumcc /= nsum;
         if (nsumi > 0) sumcci /= nsumi;
         if (nsumj > 0) sumccj /= nsumj;
-        printf("Merge avg n = %4d, cc = %8.5f, ni = %4d, cci = %8.5f, nj = %4d, ccj = %8.5f\n", nsum, sumcc, nsumi, sumcci, nsumj, sumccj);
+        //printf("Merge avg n = %4d, cc = %8.5f, ni = %4d, cci = %8.5f, nj = %4d, ccj = %8.5f\n", nsum, sumcc, nsumi, sumcci, nsumj, sumccj);
 
         //if (sumcc < 1.000*curpair.cc) continue;
         //if (sumcc > 0.75*sumccj && sumcc > 0.75*sumcci) {
@@ -651,143 +693,6 @@ bool clusterG(const TSimilarityMap & sim, TKeyPressCollection & keyPresses, TCC 
             keyPresses[i].cid = newcid[i];
         }
     }
-
-    return true;
-}
-
-float costF(const TSimilarityMap & ccMap, const TKeyPressCollection & keyPresses) {
-    int len = keyPresses.size();
-    float res = 0.0f;
-    for (int i = 0; i < len; ++i) {
-        for (int j = i + 1; j < len; ++j) {
-            if (keyPresses[i].cid == keyPresses[j].cid) {
-                res += 1.0f - ccMap.at(i).at(j).cc;
-            }
-        }
-    }
-
-    return -res;
-}
-
-float costFUpdate(const TSimilarityMap & ccMap, const TKeyPressCollection & keyPresses, int i, int cid, float c0) {
-    int len = keyPresses.size();
-    float res = -c0;
-    for (int j = 0; j < len; ++j) {
-        if (cid == keyPresses[j].cid) {
-            res -= 1.0f - ccMap.at(i).at(j).cc;
-        }
-        if (keyPresses[i].cid == keyPresses[j].cid) {
-            res += 1.0f - ccMap.at(i).at(j).cc;
-        }
-    }
-
-    return -res;
-}
-
-bool doSimulatedAnnealing(const TParameters & params, const TSimilarityMap & ccMap, TKeyPressCollection & keyPresses) {
-    int N = keyPresses.size();
-
-    std::map<int, int> csize;
-    for (auto & c : keyPresses) {
-        c.cid = rand()&27 + 1;
-        ++csize[c.cid];
-    }
-    int nonzero = csize.size();
-
-    int ncc = 0;
-    float ccavg = 0.0;
-    for (int j = 0; j < N; ++j) {
-        for (int i = j + 1; i < N; ++i) {
-            ccavg += ccMap.at(j).at(i).cc;
-            ++ncc;
-        }
-    }
-    ccavg /= ncc;
-    printf("Average cc = %g\n", ccavg);
-
-    float temp = params.temp0;
-    float cost0 = costF(ccMap, keyPresses);
-    //cost0 -= wn*nonzero;
-
-    for (int iter = 0; iter < params.saMaxIterations; ++iter) {
-        if (iter%5000 == 0) {
-            printf("Iter %5d : temp = %16.4f, cost0 = %8.4f, nonzero = %d\n", iter, temp, cost0, nonzero);
-        }
-
-        bool doMerge = false;
-        //f (nonzero > 1 && frand() > 0.990f) doMerge = true;
-        if (iter > params.saMaxIterations - 10001) doMerge = true;
-
-        if (doMerge) {
-            auto keyPressesNew = keyPresses;
-
-            int i0 = rand()%N;
-            int i1 = rand()%N;
-            while (keyPresses[i0].cid == keyPresses[i1].cid) {
-                i0 = rand()%N;
-                i1 = rand()%N;
-            }
-
-            int cid0 = keyPresses[i0].cid;
-            int cid1 = keyPresses[i1].cid;
-
-            int n0 = csize[cid0];
-            int n1 = csize[cid1];
-
-            --nonzero;
-            int saven = csize[cid1];
-            csize[cid0] += saven;
-            csize[cid1] -= saven;
-
-            for (int i = 0; i < N; ++i) {
-                if (keyPressesNew[i].cid == cid1) {
-                    keyPressesNew[i].cid = cid0;
-                }
-            }
-
-            float cost1 = costF(ccMap, keyPressesNew);
-            cost1 += 0.4f*n0*n1*(1.0f - ccavg);
-
-            float delta = cost1 - cost0;
-            if (delta > 0 || (std::exp(delta/temp) > frand())) {
-                cost0 = cost1;
-                cost0 = cost1 - 0.4f*n0*n1*(1.0f - ccavg);
-                keyPresses = keyPressesNew;
-            } else {
-                ++nonzero;
-                csize[cid0] -= saven;
-                csize[cid1] += saven;
-            }
-        } else {
-            int i = rand()%N;
-            int cid = keyPresses[i].cid;
-            while (cid == keyPresses[i].cid) {
-                keyPresses[i].cid = rand()%27 + 1;
-            }
-
-            float cost1 = costFUpdate(ccMap, keyPresses, i, cid, cost0);
-
-            if (csize[cid] == 1) nonzero--;
-            if (csize[keyPresses[i].cid] == 0) nonzero++;
-
-            float delta = cost1 - cost0;
-            if (delta > 0 || (std::exp(delta/temp) > frand())) {
-                cost0 = cost1;
-
-                csize[keyPresses[i].cid]++;
-                csize[cid]--;
-            } else {
-                if (csize[cid] == 1) nonzero++;
-                if (csize[keyPresses[i].cid] == 0) nonzero--;
-
-                keyPresses[i].cid = cid;
-            }
-        }
-
-        temp *= params.coolingRate;
-    }
-
-    keyPresses.nClusters = nonzero;
 
     return true;
 }
@@ -859,6 +764,8 @@ SDL_AudioDeviceID g_deviceIdOut = 0;
 PlaybackData g_playbackData;
 
 bool renderKeyPresses(TParameters & params, const char * fnameInput, const TWaveform & waveform, TKeyPressCollection & keyPresses) {
+    ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(g_windowSizeX, 350.0f), ImGuiCond_Once);
     if (ImGui::Begin("Key Presses")) {
         int viewMin = 512;
         int viewMax = waveform.size();
@@ -1130,6 +1037,8 @@ bool renderKeyPresses(TParameters & params, const char * fnameInput, const TWave
 }
 
 bool renderSimilarity(TParameters & params, TKeyPressCollection & keyPresses, TSimilarityMap & similarityMap) {
+    ImGui::SetNextWindowPos(ImVec2(0, 350.0f), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(0.5f*g_windowSizeX, g_windowSizeY - 350.0f), ImGuiCond_Once);
     if (ImGui::Begin("Similarity")) {
         int n = similarityMap.size();
         auto wsize = ImGui::GetContentRegionAvail();
@@ -1203,26 +1112,100 @@ bool renderSimilarity(TParameters & params, TKeyPressCollection & keyPresses, TS
     return false;
 }
 
-bool renderClusters(TParameters & params, TKeyPressCollection & keyPresses, TSimilarityMap & similarityMap) {
+bool renderClusters(TParameters & params, const Cipher::TFreqMap & freqMap, TKeyPressCollection & keyPresses, TSimilarityMap & similarityMap) {
+    ImGui::SetNextWindowPos(ImVec2(0.5f*g_windowSizeX, 350.0f), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(0.5f*g_windowSizeX, g_windowSizeY - 350.0f - 300.0f), ImGuiCond_Once);
     if (ImGui::Begin("Clusters")) {
-        static bool useDBSCAN = false;
-        static bool useSA = true;
+        if (ImGui::BeginCombo("Approach", getApproachStr(params.approach).c_str())) {
+            for (int i = 0; i < Approach::COUNT; ++i) {
+                if (ImGui::Selectable(getApproachStr((Approach)(i)).c_str(), params.approach == (Approach)(i))) {
+                    params.approach = (Approach)(i);
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        if (params.approach == Approach::DBSCAN) {
+            ImGui::SliderFloat("Threshold", &params.thresholdClustering, 0.0f, 1.0f);
+            ImGui::SliderInt("N min", &params.nMinKeysInCluster, 0, 8);
+        }
+        if (params.approach == Approach::ClusterG) {
+            ImGui::SliderFloat("Threshold", &params.thresholdClustering, 0.0f, 1.0f);
+        }
+        if (params.approach == Approach::NonExactSubstitutionCipher0) {
+            ImGui::SliderInt("Min Clusters", &params.cipher.minClusters, 2, 27);
+            ImGui::SliderInt("Max Clusters", &params.cipher.maxClusters, 3, 34);
+            ImGui::SliderFloat("English letter frequency weight", &params.cipher.wEnglishFreq, 0.0f, 20.0f);
+            ImGui::SliderFloat("Language model weight", &params.cipher.wLanguageModel, 0.0f, 2.0f);
+            ImGui::SliderInt("Iterations", &params.cipher.saMaxIterations, 1000, 50000000);
+        }
+
         ImGui::Text("Clusters: %d\n", keyPresses.nClusters);
-        ImGui::SliderFloat("Threshold", &params.thresholdClustering, 0.0f, 1.0f);
-        ImGui::SliderInt("N min", &params.nMinKeysInCluster, 0, 8);
-        ImGui::Checkbox("DBSCAN", &useDBSCAN);
-        ImGui::Checkbox("Simulated Annealing", &useSA);
-        if (ImGui::Button("Calculate") || ImGui::IsKeyPressed(23)) { // t
-            if (useSA) {
-                doSimulatedAnnealing(params, similarityMap, keyPresses);
-            } else if (useDBSCAN == false) {
-                clusterG(similarityMap, keyPresses, params.thresholdClustering);
-            } else {
-                clusterDBSCAN(similarityMap, params.thresholdClustering, params.nMinKeysInCluster, keyPresses);
+        if (ImGui::Button("Guess spaces")) {
+            for (auto & key : keyPresses) {
+                key.bind = -1;
+            }
+
+            float step = 0.05f;
+            for (float thold = step; thold < 0.9f; thold += step) {
+                clusterG(similarityMap, keyPresses, thold);
+                if (keyPresses.nClusters > 10) break;
+            }
+
+            int nIters = 1e4;
+            int nUnique = 27;
+            std::string enc = "";
+            std::string decrypted = "";
+
+            int n = keyPresses.size();
+            enc.resize(n);
+            kN = std::max(nUnique, keyPresses.nClusters);
+            std::vector<int> hint(kN + 1, -1);
+            for (int i = 0; i < n; ++i) {
+                enc[i] = keyPresses[i].cid;
+            }
+            printText(enc);
+            TFreqMap oldFreqMap;
+            auto & len  = std::get<0>(oldFreqMap);
+            auto & fmap = std::get<1>(oldFreqMap);
+            len = freqMap.len;
+            pMin = freqMap.pmin;
+            fmap = freqMap.prob;
+
+            guessSpaces(oldFreqMap, enc, decrypted, nIters, hint);
+            for (int i = 0; i < n; ++i) {
+                if (decrypted[i] < 'a' || decrypted[i] > 'z') {
+                    keyPresses[i].bind = 26;
+                }
             }
         }
 
+        if (params.approach == Approach::NonExactSubstitutionCipher0) {
+        } else {
+            ImGui::SameLine();
+            if (ImGui::Button("Calculate") || ImGui::IsKeyPressed(23)) { // t
+                if (params.approach == Approach::ClusterG) {
+                    clusterG(similarityMap, keyPresses, params.thresholdClustering);
+                } else if (params.approach == Approach::DBSCAN) {
+                    clusterDBSCAN(similarityMap, params.thresholdClustering, params.nMinKeysInCluster, keyPresses);
+                }
+
+                float cost = 0.0f;
+                for (int i = 0; i < (int)(keyPresses.size()); ++i) {
+                    for (int j = i+1; j < (int)(keyPresses.size()); ++j) {
+                        if (keyPresses[i].cid == keyPresses[j].cid) {
+                            cost += 1.0f - similarityMap[i][j].cc;
+                        }
+                    }
+                }
+                printf("clustering cost = %g\n", cost);
+            }
+        }
+
+        ImGui::BeginChildFrame(ImGui::GetID("Hints"), ImGui::GetContentRegionAvail());
+
         int n = keyPresses.size();
+        ImGui::Text("Clusters: %d\n", keyPresses.nClusters);
         ImGui::Text(" id : cid : predicted : bind");
         for (int i = 0; i < n; ++i) {
             ImGui::Text("%3d : %3d : %9c : ", i, keyPresses[i].cid, keyPresses[i].predicted);
@@ -1254,38 +1237,121 @@ bool renderClusters(TParameters & params, TKeyPressCollection & keyPresses, TSim
                 ImGui::EndCombo();
             }
             ImGui::PopItemWidth();
+            ImGui::SameLine();
+            int w = 32;
+            auto cw = ImGui::CalcTextSize("a");
+            for (int j = std::max(0, i - w); j <= std::min(n, i + w); ++j) {
+                if (j == i && keyPresses[j].bind >= 0) {
+                    if (keyPresses[j].bind == 26) {
+                        ImGui::TextColored({ 0.0f, 1.0f, 0.0f, 1.0f }, "%c", '.');
+                    } else {
+                        ImGui::TextColored({ 0.0f, 1.0f, 0.0f, 1.0f }, "%c", keyPresses[j].bind + 'a');
+                    }
+                } else {
+                    ImGui::Text("%c", keyPresses[j].predicted);
+                }
+                ImGui::SameLine();
+                auto pos = ImGui::GetCursorScreenPos();
+                ImGui::SetCursorScreenPos({ pos.x - cw.x, pos.y });
+            }
+            ImGui::Text("%s", "");
             ImGui::PopID();
         }
+
+        ImGui::EndChildFrame();
     }
     ImGui::End();
     return false;
 }
 
-bool renderSolution(const TFreqMap & freqMap, TKeyPressCollection & keyPresses) {
-    static int nIters = 1e4;
-    static int nUnique = 27;
-    static std::string enc = "";
+bool renderSolution(TParameters & params, const Cipher::TFreqMap & freqMap, TKeyPressCollection & keyPresses, const TSimilarityMap & similarityMap) {
     static std::string decrypted = "";
 
+    ImGui::SetNextWindowPos(ImVec2(0.5f*g_windowSizeX, g_windowSizeY - 300.0f), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(0.5f*g_windowSizeX, 300.0f), ImGuiCond_Once);
     if (ImGui::Begin("Solution")) {
-        ImGui::SliderInt("Iterations", &nIters, 0, 1e5);
-        ImGui::SliderInt("Unique keys", &nUnique, 26, 42);
-        if (ImGui::Button("Calculate")) {
-            int n = keyPresses.size();
-            enc.resize(n);
-            kN = std::max(nUnique, keyPresses.nClusters);
-            std::vector<int> hint(kN + 1, -1);
-            for (int i = 0; i < n; ++i) {
-                enc[i] = keyPresses[i].cid;
-                if (keyPresses[i].bind != -1) {
-                    hint[keyPresses[i].cid] = keyPresses[i].bind + 1;
+        if (params.approach == Approach::NonExactSubstitutionCipher0) {
+            if (ImGui::Button("Calculate")) {
+                Cipher::TClusters clusters;
+                Cipher::TSimilarityMap ccMap;
+                Cipher::TClusterToLetterMap clMap;
+
+                int N = keyPresses.size();
+
+                std::vector<int> hint(N, -1);
+                for (int i = 0; i < N; ++i) {
+                    if (keyPresses[i].bind < 0) continue;
+                    hint[i] = keyPresses[i].bind + 1;
                 }
+
+                Cipher::generateClusters(params.cipher, N, clusters, hint);
+                for (int k0 = 0; k0 < N; ++k0){
+                    for (int k1 = 0; k1 < N; ++k1){
+                        ccMap[k0][k1] = 0.5f*(similarityMap[k0][k1].cc + similarityMap[k1][k0].cc);
+                    }
+                }
+
+                //Cipher::doSimulatedAnnealing3(params.cipher, ccMap, clusters, hint);
+                //Cipher::doSimulatedAnnealing4(params.cipher, freqMap, clusters, clMap, hint);
+                Cipher::doSimulatedAnnealing5(params.cipher, freqMap, ccMap, clusters, clMap, hint);
+                //Cipher::subbreak(params.cipher, freqMap, clusters, clMap, hint);
+
+                decrypted = "";
+                for (int i = 0; i < N; ++i) {
+                    keyPresses[i].cid = clusters[i];
+                    if (clMap[clusters[i]] > 0 && clMap[clusters[i]] <= 26) {
+                        keyPresses[i].predicted = 'a' + clMap[clusters[i]]-1;
+                        printf("%c", 'a'+clMap[clusters[i]]-1);
+                        decrypted += 'a'+clMap[clusters[i]]-1;
+                    } else {
+                        keyPresses[i].predicted = '.';
+                        printf(".");
+                        decrypted += '.';
+                    }
+                }
+                printf("\n");
+
+                float cost = 0.0f;
+                for (int i = 0; i < (int)(keyPresses.size()); ++i) {
+                    for (int j = i+1; j < (int)(keyPresses.size()); ++j) {
+                        if (keyPresses[i].cid == keyPresses[j].cid) {
+                            cost += 1.0f - similarityMap[i][j].cc;
+                        }
+                    }
+                }
+                printf("clustering cost = %g\n", cost);
             }
-            printText(enc);
-            decrypt(freqMap, enc, decrypted, nIters, hint);
-            for (int i = 0; i < n; ++i) keyPresses[i].predicted = decrypted[i];
-            printf("Done\n");
+        } else {
+            static int nIters = 1e4;
+            static int nUnique = 27;
+            static std::string enc = "";
+
+            ImGui::SliderInt("Iterations", &nIters, 0, 1e5);
+            if (ImGui::Button("Calculate")) {
+                int n = keyPresses.size();
+                enc.resize(n);
+                kN = std::max(nUnique, keyPresses.nClusters);
+                std::vector<int> hint(kN + 1, -1);
+                for (int i = 0; i < n; ++i) {
+                    enc[i] = keyPresses[i].cid;
+                    if (keyPresses[i].bind != -1) {
+                        hint[keyPresses[i].cid] = keyPresses[i].bind + 1;
+                    }
+                }
+                printText(enc);
+                TFreqMap oldFreqMap;
+                auto & len  = std::get<0>(oldFreqMap);
+                auto & fmap = std::get<1>(oldFreqMap);
+                len = freqMap.len;
+                pMin = freqMap.pmin;
+                fmap = freqMap.prob;
+
+                decrypt(oldFreqMap, enc, decrypted, nIters, hint);
+                for (int i = 0; i < n; ++i) keyPresses[i].predicted = decrypted[i];
+                printf("Done\n");
+            }
         }
+
         ImGui::PushTextWrapPos(ImGui::GetContentRegionAvailWidth());
         ImGui::Text("%s", decrypted.c_str());
         ImGui::PopTextWrapPos();
@@ -1400,13 +1466,10 @@ int main(int argc, char ** argv) {
         return -1;
     }
 
-    TFreqMap freqMap;
-    if (loadFreqMap(argv[2], freqMap) == false) {
+    Cipher::TFreqMap freqMap;
+    if (Cipher::loadFreqMap(argv[2], freqMap) == false) {
         return -1;
     }
-
-    int windowSizeX = 1920;
-    int windowSizeY = 1200;
 
 #if __APPLE__
     // GL 3.2 Core + GLSL 150
@@ -1430,7 +1493,7 @@ int main(int argc, char ** argv) {
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
     SDL_DisplayMode current;
     SDL_GetCurrentDisplayMode(0, &current);
-    SDL_Window* window = SDL_CreateWindow("Keytap", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, windowSizeX, windowSizeY, SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE|SDL_WINDOW_ALLOW_HIGHDPI);
+    SDL_Window* window = SDL_CreateWindow("Keytap", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, g_windowSizeX, g_windowSizeY, SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE|SDL_WINDOW_ALLOW_HIGHDPI);
     SDL_GLContext gl_context = SDL_GL_CreateContext(window);
     SDL_GL_SetSwapInterval(1); // Enable vsync
 
@@ -1479,7 +1542,7 @@ int main(int argc, char ** argv) {
             };
         }
 
-        SDL_GetWindowSize(window, &windowSizeX, &windowSizeY);
+        SDL_GetWindowSize(window, &g_windowSizeX, &g_windowSizeY);
 
         auto tStart = std::chrono::high_resolution_clock::now();
 
@@ -1493,8 +1556,8 @@ int main(int argc, char ** argv) {
 
         renderKeyPresses(params, argv[1], waveformInput, keyPresses);
         renderSimilarity(params, keyPresses, similarityMap);
-        renderClusters(params, keyPresses, similarityMap);
-        renderSolution(freqMap, keyPresses);
+        renderClusters(params, freqMap, keyPresses, similarityMap);
+        renderSolution(params, freqMap, keyPresses, similarityMap);
 
         ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
 
